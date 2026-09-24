@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520" fill="none">
+  <defs>
+    <linearGradient id="g1" x1="120" y1="40" x2="500" y2="460" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3EF07B"/><stop offset="1" stop-color="#008B7A"/></linearGradient>
+    <linearGradient id="g2" x1="260" y1="120" x2="640" y2="460" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#49F284"/><stop offset="1" stop-color="#00C96B"/></linearGradient>
+    <linearGradient id="g3" x1="360" y1="220" x2="660" y2="500" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#00695F"/><stop offset="1" stop-color="#19D46A"/></linearGradient>
+  </defs>
+  <rect x="90" y="60" width="170" height="360" rx="18" fill="url(#g1)"/>
+  <polygon points="240,250 470,60 690,60 405,250" fill="url(#g2)"/>
+  <polygon points="405,250 690,420 470,420 310,250" fill="url(#g3)"/>
+  <rect x="260" y="60" width="12" height="360" rx="6" fill="#FFFFFF"/>
+  <circle cx="261" cy="240" r="55" stroke="#FFFFFF" stroke-width="12" fill="none"/>
+  <path d="M100 170 H165 V310 H100" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M360 318 L432 384 L570 250" stroke="#FFFFFF" stroke-width="36" stroke-linecap="square" stroke-linejoin="miter" fill="none"/>
+  <g fill="#071E3D" font-family="Inter, Arial, Helvetica, sans-serif" font-weight="800" font-size="220"><text x="770" y="320">Kickly</text></g>
+  <circle cx="1090" cy="104" r="26" fill="#20DD6D"/>
+</svg>
