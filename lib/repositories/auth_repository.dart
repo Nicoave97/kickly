@@ -51,7 +51,8 @@ class AuthRepository {
   }
 
   Future<void> requestPasswordReset(String email) async {
-    final redirectTo = kIsWeb ? '${Uri.base.origin}/#/reset-password' : null;
+    final redirectTo =
+    kIsWeb ? Uri.base.resolve('#/reset-password').toString() : null;
     await _db.auth.resetPasswordForEmail(
       email.trim(),
       redirectTo: redirectTo,

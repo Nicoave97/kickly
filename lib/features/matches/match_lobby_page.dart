@@ -44,7 +44,8 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
     }
   }
 
-  String inviteUrl(MatchModel match) => '${Uri.base.origin}/#/join/${match.inviteCode}';
+  String inviteUrl(MatchModel match) =>
+    Uri.base.resolve('#/join/${match.inviteCode}').toString();
 
   Future<void> shareOnWhatsApp(MatchModel match) async {
     if (match.isCompleted) return;
