@@ -24,7 +24,12 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
   late final Stream<List<MatchParticipant>> participantsStream =
       MatchRepository().watchParticipants(widget.matchId);
 
-  void reloadMatch() => setState(() => matchFuture = MatchRepository().getMatch(widget.matchId));
+  void reloadMatch() {
+    if (!mounted) return;
+    setState(() {
+      matchFuture = MatchRepository().getMatch(widget.matchId);
+    });
+  }
 
   Future<void> action(Future<void> Function() fn, {String? success}) async {
     try {
@@ -41,14 +46,21 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
 
   String inviteUrl(MatchModel match) => '${Uri.base.origin}/#/join/${match.inviteCode}';
 
-  Future<void> share(MatchModel match) async {
+  Future<void> shareOnWhatsApp(MatchModel match) async {
+    if (match.isCompleted) return;
     final text = '${match.title}\n${DateFormat('dd/MM · HH:mm').format(match.startsAt)} · ${match.venueName}\n\nEntra nella lobby Kickly: ${inviteUrl(match)}';
     final uri = Uri.parse('https://wa.me/?text=${Uri.encodeComponent(text)}');
-    if (!await launchUrl(uri)) {
-      await Clipboard.setData(ClipboardData(text: inviteUrl(match)));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Link copiato.')));
-      }
+    final opened = await launchUrl(uri);
+    if (!opened) await copyInvite(match);
+  }
+
+  Future<void> copyInvite(MatchModel match) async {
+    if (match.isCompleted) return;
+    await Clipboard.setData(ClipboardData(text: inviteUrl(match)));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Link invito copiato.')),
+      );
     }
   }
 
@@ -78,19 +90,9 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
   Widget build(BuildContext context) {
     final uid = Supabase.instance.client.auth.currentUser!.id;
     return Scaffold(
-      appBar: KicklyAppBar(
+      appBar: const KicklyAppBar(
         title: 'Lobby',
         fallbackLocation: '/matches',
-        actions: [
-          FutureBuilder<MatchModel>(
-            future: matchFuture,
-            builder: (context, snapshot) => IconButton(
-              tooltip: 'Condividi invito',
-              onPressed: snapshot.hasData ? () => share(snapshot.data!) : null,
-              icon: const Icon(Icons.ios_share_rounded),
-            ),
-          ),
-        ],
       ),
       body: FutureBuilder<MatchModel>(
         future: matchFuture,
@@ -118,13 +120,31 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
                     children: [
                       _MatchHeader(match: match, confirmed: confirmed, waitCount: wait.length),
                       const SizedBox(height: 14),
-                      if (!match.isCompleted)
+                      if (!match.isCompleted) ...[
                         _JoinArea(
                           match: match,
                           me: me,
-                          onJoin: (team) => action(() => MatchRepository().joinMatch(match.id, team: team)),
-                          onLeave: me == null ? null : () => action(() => MatchRepository().leaveMatch(match.id)),
+                          onLeave: me == null
+                              ? null
+                              : () => action(() => MatchRepository().leaveMatch(match.id)),
+                          onAttendance: me == null || me.waiting
+                              ? null
+                              : (status) => action(
+                                  () => MatchRepository().setAttendanceStatus(match.id, status),
+                                  success: status == 'confirmed'
+                                      ? 'Presenza confermata.'
+                                      : status == 'maybe'
+                                          ? 'Presenza segnata come incerta.'
+                                          : 'Hai indicato che non ci sarai.',
+                                ),
                         ),
+                        const SizedBox(height: 14),
+                        _InviteActionsCard(
+                          match: match,
+                          onWhatsApp: () => shareOnWhatsApp(match),
+                          onCopy: () => copyInvite(match),
+                        ),
+                      ],
                       const SizedBox(height: 18),
                       Card(
                         child: Padding(
@@ -166,6 +186,12 @@ class _MatchLobbyPageState extends State<MatchLobbyPage> {
                               },
                               icon: const Icon(Icons.flag_outlined),
                               label: const Text('Chiudi partita e inserisci risultato'),
+                            ),
+                          if (match.isCompleted)
+                            FilledButton.icon(
+                              onPressed: () => context.push('/match/${match.id}/recap'),
+                              icon: const Icon(Icons.assessment_outlined),
+                              label: const Text('Vedi recap partita'),
                             ),
                           if (match.isCompleted && match.ratingsOpen && me?.confirmed == true)
                             FilledButton.icon(
@@ -293,60 +319,204 @@ class _StatusBadge extends StatelessWidget {
 class _JoinArea extends StatelessWidget {
   final MatchModel match;
   final MatchParticipant? me;
-  final Future<void> Function(String team) onJoin;
   final Future<void> Function()? onLeave;
-  const _JoinArea({required this.match, required this.me, required this.onJoin, this.onLeave});
+  final Future<void> Function(String status)? onAttendance;
+
+  const _JoinArea({
+    required this.match,
+    required this.me,
+    this.onLeave,
+    this.onAttendance,
+  });
 
   @override
   Widget build(BuildContext context) {
-    if (me != null) {
-      if (me!.confirmed && me!.team == 'unassigned' && match.teamMode == TeamMode.selfChoice) {
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+    if (me == null) return const SizedBox.shrink();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
               children: [
-                const Text('Sei dentro. Scegli la tua squadra:', style: TextStyle(fontWeight: FontWeight.w700)),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton(onPressed: () => MatchRepository().setTeam(match.id, me!.userId, 'a'), child: Text(match.teamAName)),
-                    FilledButton(onPressed: () => MatchRepository().setTeam(match.id, me!.userId, 'b'), child: Text(match.teamBName)),
-                    TextButton(onPressed: onLeave, child: const Text('Esci dalla partita')),
-                  ],
+                Icon(
+                  me!.waiting ? Icons.event_seat_outlined : Icons.check_circle_outline_rounded,
+                  color: me!.waiting ? AppColors.warning : AppColors.primary,
                 ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        me!.waiting ? 'Sei in lista d’attesa' : 'Sei nella partita',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      Text(
+                        me!.team == 'unassigned'
+                            ? 'Squadra non ancora assegnata'
+                            : 'Squadra ${me!.team.toUpperCase()}',
+                        style: const TextStyle(color: AppColors.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(onPressed: onLeave, child: const Text('Esci')),
               ],
             ),
-          ),
-        );
-      }
-      return Card(
-        child: ListTile(
-          leading: Icon(me!.waiting ? Icons.event_seat_outlined : Icons.check_circle_outline_rounded, color: me!.waiting ? AppColors.warning : AppColors.primary),
-          title: Text(me!.waiting ? 'Sei in lista d’attesa' : 'Partecipazione confermata', style: const TextStyle(fontWeight: FontWeight.w700)),
-          subtitle: Text(me!.team == 'unassigned' ? 'Squadra non ancora assegnata' : 'Squadra ${me!.team.toUpperCase()}'),
-          trailing: TextButton(onPressed: onLeave, child: const Text('Esci')),
+            if (!me!.waiting) ...[
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 14),
+              const Text('Conferma presenza', style: TextStyle(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              const Text(
+                'Fai sapere al gruppo se ci sarai davvero.',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _AttendanceChoice(
+                    label: 'Ci sono',
+                    icon: Icons.check_rounded,
+                    selected: me!.attendanceStatus == 'confirmed',
+                    onTap: onAttendance == null ? null : () => onAttendance!('confirmed'),
+                  ),
+                  _AttendanceChoice(
+                    label: 'Forse',
+                    icon: Icons.help_outline_rounded,
+                    selected: me!.attendanceStatus == 'maybe',
+                    onTap: onAttendance == null ? null : () => onAttendance!('maybe'),
+                  ),
+                  _AttendanceChoice(
+                    label: 'Non ci sono',
+                    icon: Icons.close_rounded,
+                    selected: me!.attendanceStatus == 'declined',
+                    onTap: onAttendance == null ? null : () => onAttendance!('declined'),
+                  ),
+                ],
+              ),
+            ],
+            if (me!.confirmed && me!.team == 'unassigned' && match.teamMode == TeamMode.selfChoice) ...[
+              const SizedBox(height: 16),
+              const Divider(height: 1),
+              const SizedBox(height: 14),
+              const Text('Scegli la tua squadra', style: TextStyle(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: () => MatchRepository().setTeam(match.id, me!.userId, 'a'),
+                    child: Text(match.teamAName),
+                  ),
+                  FilledButton(
+                    onPressed: () => MatchRepository().setTeam(match.id, me!.userId, 'b'),
+                    child: Text(match.teamBName),
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
-      );
-    }
-    if (match.teamMode == TeamMode.selfChoice) {
-      return Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          FilledButton(onPressed: () => onJoin('a'), child: Text('Entra in ${match.teamAName}')),
-          FilledButton(onPressed: () => onJoin('b'), child: Text('Entra in ${match.teamBName}')),
-        ],
-      );
-    }
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: FilledButton.icon(onPressed: () => onJoin('unassigned'), icon: const Icon(Icons.check_rounded), label: const Text('Partecipo')),
+      ),
     );
   }
+}
+
+class _AttendanceChoice extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  const _AttendanceChoice({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (selected) {
+      return FilledButton.tonalIcon(
+        onPressed: onTap,
+        icon: Icon(icon, size: 18),
+        label: Text(label),
+      );
+    }
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 18),
+      label: Text(label),
+    );
+  }
+}
+
+class _InviteActionsCard extends StatelessWidget {
+  final MatchModel match;
+  final VoidCallback onWhatsApp;
+  final VoidCallback onCopy;
+  const _InviteActionsCard({
+    required this.match,
+    required this.onWhatsApp,
+    required this.onCopy,
+  });
+
+  @override
+  Widget build(BuildContext context) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.person_add_alt_1_rounded),
+                  SizedBox(width: 9),
+                  Text(
+                    'Invita giocatori',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Chi riceve il link vedrà i dettagli della partita e potrà entrare solo dopo aver confermato l’invito.',
+                style: TextStyle(color: AppColors.textSecondary),
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: onWhatsApp,
+                    icon: const Icon(Icons.chat_outlined),
+                    label: const Text('Invia su WhatsApp'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: onCopy,
+                    icon: const Icon(Icons.link_rounded),
+                    label: const Text('Copia link'),
+                  ),
+                  Chip(
+                    avatar: const Icon(Icons.key_rounded, size: 16),
+                    label: Text(match.inviteCode),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 class _WaitlistCard extends StatelessWidget {

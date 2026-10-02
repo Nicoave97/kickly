@@ -11,6 +11,7 @@ import '../../features/matches/create_match_page.dart';
 import '../../features/matches/finish_match_page.dart';
 import '../../features/matches/invite_page.dart';
 import '../../features/matches/match_lobby_page.dart';
+import '../../features/matches/match_recap_page.dart';
 import '../../features/matches/matches_page.dart';
 import '../../features/matches/rate_match_page.dart';
 import '../../features/profile/edit_profile_page.dart';
@@ -83,6 +84,10 @@ GoRouter createAppRouter() {
       GoRoute(
         path: '/match/:id/finish',
         builder: (_, state) => FinishMatchPage(matchId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/match/:id/recap',
+        builder: (_, state) => MatchRecapPage(matchId: state.pathParameters['id']!),
       ),
       GoRoute(
         path: '/match/:id/rate',

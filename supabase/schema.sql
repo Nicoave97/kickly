@@ -50,6 +50,7 @@ create table if not exists public.match_players (
   team text not null default 'unassigned' check (team in ('a','b','unassigned')),
   position_x numeric(5,4) check (position_x is null or (position_x >= 0 and position_x <= 1)),
   position_y numeric(5,4) check (position_y is null or (position_y >= 0 and position_y <= 1)),
+  attendance_status text not null default 'pending' check (attendance_status in ('pending','confirmed','maybe','declined')),
   joined_at timestamptz not null default now(),
   primary key (match_id,user_id)
 );
@@ -157,7 +158,10 @@ drop trigger if exists trg_prepare_match_player on public.match_players;
 create trigger trg_prepare_match_player before insert on public.match_players for each row execute function private.prepare_match_player();
 
 create or replace function private.guard_match_player_update()
-returns trigger language plpgsql set search_path = '' as $$
+returns trigger
+language plpgsql
+set search_path to ''
+as $function$
 declare
   v_creator uuid;
   v_team_mode text;
@@ -168,15 +172,14 @@ begin
     raise exception 'Identità partecipante non modificabile';
   end if;
 
-  select creator_id,team_mode,max_players
-  into v_creator,v_team_mode,v_max
+  select creator_id,team_mode,max_players into v_creator,v_team_mode,v_max
   from public.matches where id=old.match_id;
 
   if (select auth.uid()) = v_creator then
     if old.status='waitlist' and new.status='confirmed' then
       select count(*) into v_confirmed
-      from public.match_players mp
-      where mp.match_id=old.match_id and mp.status='confirmed';
+      from public.match_players
+      where public.match_players.match_id=old.match_id and status='confirmed';
       if v_confirmed >= v_max then raise exception 'Nessun posto libero'; end if;
     end if;
     return new;
@@ -184,8 +187,18 @@ begin
 
   if (select auth.uid()) = old.user_id then
     if new.status <> old.status or new.joined_at <> old.joined_at then
-      raise exception 'Puoi modificare solo la tua squadra';
+      raise exception 'Stato partecipazione non modificabile';
     end if;
+
+    if new.attendance_status is distinct from old.attendance_status then
+      if new.team is distinct from old.team
+        or new.position_x is distinct from old.position_x
+        or new.position_y is distinct from old.position_y then
+        raise exception 'Modifica presenza non valida';
+      end if;
+      return new;
+    end if;
+
     if v_team_mode <> 'self' or old.status <> 'confirmed' then
       raise exception 'Cambio squadra non consentito';
     end if;
@@ -193,7 +206,7 @@ begin
   end if;
 
   raise exception 'Operazione non consentita';
-end; $$;
+end; $function$;
 revoke all on function private.guard_match_player_update() from public, anon, authenticated;
 
 drop trigger if exists trg_guard_match_player_update on public.match_players;
@@ -461,3 +474,138 @@ using (bucket_id='avatars' and (storage.foldername(name))[1]=(select auth.uid():
 with check (bucket_id='avatars' and (storage.foldername(name))[1]=(select auth.uid()::text));
 create policy avatar_delete_own on storage.objects for delete to authenticated
 using (bucket_id='avatars' and (storage.foldername(name))[1]=(select auth.uid()::text));
+
+-- Kickly security hardening: least-privilege grants, private lobbies,
+-- secure invite join, login rate limiting and server-side input constraints.
+
+revoke all privileges on table public.profiles from anon, authenticated;
+revoke all privileges on table public.profile_private from anon, authenticated;
+revoke all privileges on table public.matches from anon, authenticated;
+revoke all privileges on table public.match_players from anon, authenticated;
+revoke all privileges on table public.match_player_stats from anon, authenticated;
+revoke all privileges on table public.ratings from anon, authenticated;
+revoke all privileges on table public.player_career_stats from anon, authenticated;
+
+grant select, update on table public.profiles to authenticated;
+grant select, insert, update on table public.profile_private to authenticated;
+grant select, insert, update, delete on table public.matches to authenticated;
+grant select, update, delete on table public.match_players to authenticated;
+grant select on table public.match_player_stats to authenticated;
+grant insert(match_id, user_id, goals) on table public.match_player_stats to authenticated;
+grant update(goals) on table public.match_player_stats to authenticated;
+grant select, insert, update, delete on table public.ratings to authenticated;
+grant select on table public.player_career_stats to authenticated;
+
+alter table public.profiles
+  drop constraint if exists profiles_username_format_check,
+  add constraint profiles_username_format_check check (username ~ '^[a-z0-9_]{3,30}$'),
+  drop constraint if exists profiles_full_name_length_check,
+  add constraint profiles_full_name_length_check check (char_length(full_name) between 1 and 80),
+  drop constraint if exists profiles_preferred_role_check,
+  add constraint profiles_preferred_role_check check (preferred_role in ('Non specificato','Portiere','Difensore','Centrocampista','Attaccante','Universale')),
+  drop constraint if exists profiles_avatar_url_length_check,
+  add constraint profiles_avatar_url_length_check check (avatar_url is null or char_length(avatar_url) <= 2048);
+
+alter table public.matches
+  drop constraint if exists matches_venue_name_length_check,
+  add constraint matches_venue_name_length_check check (char_length(venue_name) between 1 and 120),
+  drop constraint if exists matches_venue_address_length_check,
+  add constraint matches_venue_address_length_check check (venue_address is null or char_length(venue_address) <= 240),
+  drop constraint if exists matches_team_a_name_length_check,
+  add constraint matches_team_a_name_length_check check (char_length(team_a_name) between 1 and 40),
+  drop constraint if exists matches_team_b_name_length_check,
+  add constraint matches_team_b_name_length_check check (char_length(team_b_name) between 1 and 40),
+  drop constraint if exists matches_invite_code_format_check,
+  add constraint matches_invite_code_format_check check (invite_code ~ '^[A-Z0-9]{8}$');
+
+create table if not exists private.login_attempts (
+  id bigint generated by default as identity primary key,
+  identifier_hash text not null,
+  ip_hash text,
+  attempted_at timestamptz not null default now()
+);
+create index if not exists login_attempts_identifier_time_idx
+  on private.login_attempts(identifier_hash, attempted_at desc);
+create index if not exists login_attempts_ip_time_idx
+  on private.login_attempts(ip_hash, attempted_at desc) where ip_hash is not null;
+revoke all on table private.login_attempts from public, anon, authenticated;
+
+create or replace function public.consume_username_login_attempt(
+  p_identifier_hash text,
+  p_ip_hash text default null
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_identifier_count integer;
+  v_ip_count integer := 0;
+begin
+  if p_identifier_hash is null or length(p_identifier_hash) < 32 then return false; end if;
+  delete from private.login_attempts where attempted_at < now() - interval '1 hour';
+  select count(*) into v_identifier_count
+  from private.login_attempts
+  where identifier_hash = p_identifier_hash and attempted_at >= now() - interval '5 minutes';
+  if p_ip_hash is not null then
+    select count(*) into v_ip_count
+    from private.login_attempts
+    where ip_hash = p_ip_hash and attempted_at >= now() - interval '5 minutes';
+  end if;
+  if v_identifier_count >= 15 or v_ip_count >= 40 then return false; end if;
+  insert into private.login_attempts(identifier_hash, ip_hash) values (p_identifier_hash, p_ip_hash);
+  return true;
+end;
+$$;
+revoke all on function public.consume_username_login_attempt(text,text) from public, anon, authenticated;
+grant execute on function public.consume_username_login_attempt(text,text) to service_role;
+
+create or replace function private.can_access_match(p_match_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select
+    (select auth.uid()) is not null
+    and exists (
+      select 1
+      from public.matches m
+      where m.id = p_match_id
+        and (
+          m.status = 'completed'
+          or m.creator_id = (select auth.uid())
+          or exists (
+            select 1 from public.match_players mp
+            where mp.match_id = m.id and mp.user_id = (select auth.uid())
+          )
+        )
+    );
+$$;
+
+grant usage on schema private to authenticated;
+revoke all on function private.can_access_match(uuid) from public, anon;
+grant execute on function private.can_access_match(uuid) to authenticated;
+
+drop policy if exists matches_read on public.matches;
+create policy matches_read on public.matches for select to authenticated
+using (
+  creator_id = (select auth.uid())
+  or status='completed'
+  or private.can_access_match(id)
+);
+
+drop policy if exists match_players_read on public.match_players;
+create policy match_players_read on public.match_players for select to authenticated
+using (private.can_access_match(match_id));
+
+drop policy if exists match_players_join_self on public.match_players;
+revoke insert on table public.match_players from authenticated;
+
+-- Invite preview/join are intentionally handled by the authenticated
+-- Edge Function `match-invite`, not by SECURITY DEFINER RPCs in the Data API.
+drop function if exists public.preview_match_invite(text);
+drop function if exists public.join_match_by_code(text,text);
+drop function if exists public.can_access_match(uuid);

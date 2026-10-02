@@ -9,6 +9,7 @@ class MatchParticipant {
   final ProfileModel profile;
   final double? positionX;
   final double? positionY;
+  final String attendanceStatus;
 
   const MatchParticipant({
     required this.matchId,
@@ -19,10 +20,14 @@ class MatchParticipant {
     required this.profile,
     this.positionX,
     this.positionY,
+    required this.attendanceStatus,
   });
 
   bool get confirmed => status == 'confirmed';
   bool get waiting => status == 'waitlist';
+  bool get attendanceConfirmed => attendanceStatus == 'confirmed';
+  bool get attendanceMaybe => attendanceStatus == 'maybe';
+  bool get attendanceDeclined => attendanceStatus == 'declined';
 
   factory MatchParticipant.fromMaps(
       Map<String, dynamic> row, Map<String, dynamic> profile) {
@@ -35,6 +40,7 @@ class MatchParticipant {
       profile: ProfileModel.fromMap(profile),
       positionX: (row['position_x'] as num?)?.toDouble(),
       positionY: (row['position_y'] as num?)?.toDouble(),
+      attendanceStatus: (row['attendance_status'] as String?) ?? 'pending',
     );
   }
 }

@@ -1,6 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/match_model.dart';
 import '../models/match_participant.dart';
+import '../models/match_recap.dart';
 
 class CreateMatchInput {
   final String title;
@@ -59,11 +60,8 @@ class MatchRepository {
 
     final match = MatchModel.fromMap(row);
     try {
-      await _db.from('match_players').insert({
-        'match_id': match.id,
-        'user_id': _uid,
-        'team': 'unassigned',
-      });
+      // Anche l'organizzatore entra passando dalla stessa RPC sicura usata dagli invitati.
+      await joinMatchByInviteCode(match.inviteCode);
     } catch (_) {
       await _db.from('matches').delete().eq('id', match.id);
       rethrow;
@@ -76,13 +74,49 @@ class MatchRepository {
     return MatchModel.fromMap(row);
   }
 
-  Future<MatchModel> getMatchByInviteCode(String code) async {
-    final row = await _db
-        .from('matches')
-        .select()
-        .eq('invite_code', code.toUpperCase())
-        .single();
-    return MatchModel.fromMap(row);
+  Future<MatchModel> previewMatchInvite(String code) async {
+    final response = await _db.functions.invoke(
+      'match-invite',
+      body: {
+        'action': 'preview',
+        'code': code.trim().toUpperCase(),
+      },
+    );
+
+    final data = response.data;
+    if (response.status < 200 ||
+        response.status >= 300 ||
+        data is! Map ||
+        data['match'] is! Map) {
+      throw Exception('Invito non valido o partita non disponibile.');
+    }
+
+    return MatchModel.fromMap(
+      Map<String, dynamic>.from(data['match'] as Map),
+    );
+  }
+
+  Future<String> joinMatchByInviteCode(String code) async {
+    final response = await _db.functions.invoke(
+      'match-invite',
+      body: {
+        'action': 'join',
+        'code': code.trim().toUpperCase(),
+      },
+    );
+
+    final data = response.data;
+    if (response.status < 200 ||
+        response.status >= 300 ||
+        data is! Map ||
+        data['match_id'] is! String) {
+      final message = data is Map && data['error'] is String
+          ? data['error'] as String
+          : 'Impossibile entrare nella partita.';
+      throw Exception(message);
+    }
+
+    return data['match_id'] as String;
   }
 
   Future<Set<String>> _relevantMatchIds() async {
@@ -148,14 +182,6 @@ class MatchRepository {
         .eq('match_id', matchId)
         .eq('user_id', _uid)
         .maybeSingle();
-  }
-
-  Future<void> joinMatch(String matchId, {String team = 'unassigned'}) async {
-    await _db.from('match_players').insert({
-      'match_id': matchId,
-      'user_id': _uid,
-      'team': team,
-    });
   }
 
   Future<void> leaveMatch(String matchId) async {
@@ -228,8 +254,7 @@ class MatchRepository {
     };
   }
 
-  Future<void> submitRatings(
-      String matchId, Map<String, double> ratings) async {
+  Future<void> submitRatings(String matchId, Map<String, double> ratings) async {
     if (ratings.isEmpty) return;
     final payload = ratings.entries
         .map((e) => {
@@ -243,6 +268,69 @@ class MatchRepository {
           payload,
           onConflict: 'match_id,from_user_id,to_user_id',
         );
+  }
+
+
+  Future<void> setAttendanceStatus(String matchId, String status) async {
+    const allowed = {'pending', 'confirmed', 'maybe', 'declined'};
+    if (!allowed.contains(status)) {
+      throw ArgumentError('Stato presenza non valido');
+    }
+    await _db
+        .from('match_players')
+        .update({'attendance_status': status})
+        .eq('match_id', matchId)
+        .eq('user_id', _uid);
+  }
+
+  Future<({int confirmed, int maybe, int pending})> getAttendanceSummary(String matchId) async {
+    final rows = await _db
+        .from('match_players')
+        .select('attendance_status,status')
+        .eq('match_id', matchId);
+    var confirmed = 0;
+    var maybe = 0;
+    var pending = 0;
+    for (final row in rows) {
+      if (row['status'] != 'confirmed') continue;
+      switch (row['attendance_status']) {
+        case 'confirmed':
+          confirmed++;
+          break;
+        case 'maybe':
+          maybe++;
+          break;
+        case 'pending':
+          pending++;
+          break;
+        default:
+          break;
+      }
+    }
+    return (confirmed: confirmed, maybe: maybe, pending: pending);
+  }
+
+  Future<MatchRecap> getMatchRecap(String matchId) async {
+    final match = await getMatch(matchId);
+    final participants = await watchParticipants(matchId).first;
+    final rows = await _db
+        .from('match_player_stats')
+        .select('user_id,goals,rating_avg,rating_count')
+        .eq('match_id', matchId);
+    final byUser = {for (final row in rows) row['user_id'] as String: row};
+    final players = participants
+        .where((p) => p.confirmed)
+        .map((p) {
+          final row = byUser[p.userId];
+          return MatchRecapPlayer(
+            participant: p,
+            goals: (row?['goals'] as num?)?.toInt() ?? 0,
+            rating: (row?['rating_avg'] as num?)?.toDouble(),
+            ratingCount: (row?['rating_count'] as num?)?.toInt() ?? 0,
+          );
+        })
+        .toList();
+    return MatchRecap(match: match, players: players);
   }
 
   Future<void> closeRatings(String matchId) async {
